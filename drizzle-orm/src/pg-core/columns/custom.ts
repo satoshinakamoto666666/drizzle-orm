@@ -2,7 +2,7 @@ import type { ColumnBuilderBaseConfig, ColumnBuilderRuntimeConfig, MakeColumnCon
 import type { ColumnBaseConfig } from '~/column.ts';
 import { entityKind } from '~/entity.ts';
 import type { AnyPgTable } from '~/pg-core/table.ts';
-import type { SQL } from '~/sql/sql.ts';
+import type { DriverValueMapper, SQL } from '~/sql/sql.ts';
 import { type Equal, getColumnNameAndConfig } from '~/utils.ts';
 import { PgColumn, PgColumnBuilder } from './common.ts';
 
@@ -63,6 +63,10 @@ export class PgCustomColumn<T extends ColumnBaseConfig<'custom', 'PgCustomColumn
 	private sqlName: string;
 	private mapTo?: (value: T['data']) => T['driverParam'];
 	private mapFrom?: (value: T['driverParam']) => T['data'];
+	readonly selectFromDb?: (
+		column: string,
+		decoder: DriverValueMapper<T['data'], T['driverParam']>,
+	) => SQL<T['data']> | SQL.Aliased<T['data']>;
 
 	constructor(
 		table: AnyPgTable<{ name: T['tableName'] }>,
@@ -72,10 +76,18 @@ export class PgCustomColumn<T extends ColumnBaseConfig<'custom', 'PgCustomColumn
 		this.sqlName = config.customTypeParams.dataType(config.fieldConfig);
 		this.mapTo = config.customTypeParams.toDriver;
 		this.mapFrom = config.customTypeParams.fromDriver;
+		this.selectFromDb = config.customTypeParams.selectFromDb;
 	}
 
 	getSQLType(): string {
 		return this.sqlName;
+	}
+
+	getSelectSQL(): SQL<T['data']> | SQL.Aliased<T['data']> | undefined {
+		if (typeof this.selectFromDb === 'function') {
+			return this.selectFromDb(this.name, this);
+		}
+		return undefined;
 	}
 
 	override mapFromDriverValue(value: T['driverParam']): T['data'] {
@@ -88,118 +100,27 @@ export class PgCustomColumn<T extends ColumnBaseConfig<'custom', 'PgCustomColumn
 }
 
 export type CustomTypeValues = {
-	/**
-	 * Required type for custom column, that will infer proper type model
-	 *
-	 * Examples:
-	 *
-	 * If you want your column to be `string` type after selecting/or on inserting - use `data: string`. Like `text`, `varchar`
-	 *
-	 * If you want your column to be `number` type after selecting/or on inserting - use `data: number`. Like `integer`
-	 */
 	data: unknown;
-
-	/**
-	 * Type helper, that represents what type database driver is accepting for specific database data type
-	 */
 	driverData?: unknown;
-
-	/**
-	 * What config type should be used for {@link CustomTypeParams} `dataType` generation
-	 */
 	config?: Record<string, any>;
-
-	/**
-	 * Whether the config argument should be required or not
-	 * @default false
-	 */
 	configRequired?: boolean;
-
-	/**
-	 * If your custom data type should be notNull by default you can use `notNull: true`
-	 *
-	 * @example
-	 * const customSerial = customType<{ data: number, notNull: true, default: true }>({
-	 * 	  dataType() {
-	 * 	    return 'serial';
-	 *    },
-	 * });
-	 */
 	notNull?: boolean;
-
-	/**
-	 * If your custom data type has default you can use `default: true`
-	 *
-	 * @example
-	 * const customSerial = customType<{ data: number, notNull: true, default: true }>({
-	 * 	  dataType() {
-	 * 	    return 'serial';
-	 *    },
-	 * });
-	 */
 	default?: boolean;
 };
 
 export interface CustomTypeParams<T extends CustomTypeValues> {
-	/**
-	 * Database data type string representation, that is used for migrations
-	 * @example
-	 * ```
-	 * `jsonb`, `text`
-	 * ```
-	 *
-	 * If database data type needs additional params you can use them from `config` param
-	 * @example
-	 * ```
-	 * `varchar(256)`, `numeric(2,3)`
-	 * ```
-	 *
-	 * To make `config` be of specific type please use config generic in {@link CustomTypeValues}
-	 *
-	 * @example
-	 * Usage example
-	 * ```
-	 *   dataType() {
-	 *     return 'boolean';
-	 *   },
-	 * ```
-	 * Or
-	 * ```
-	 *   dataType(config) {
-	 * 	   return typeof config.length !== 'undefined' ? `varchar(${config.length})` : `varchar`;
-	 * 	 }
-	 * ```
-	 */
 	dataType: (config: T['config'] | (Equal<T['configRequired'], true> extends true ? never : undefined)) => string;
-
-	/**
-	 * Optional mapping function, between user input and driver
-	 * @example
-	 * For example, when using jsonb we need to map JS/TS object to string before writing to database
-	 * ```
-	 * toDriver(value: TData): string {
-	 * 	 return JSON.stringify(value);
-	 * }
-	 * ```
-	 */
 	toDriver?: (value: T['data']) => T['driverData'] | SQL;
-
-	/**
-	 * Optional mapping function, that is responsible for data mapping from database to JS/TS code
-	 * @example
-	 * For example, when using timestamp we need to map string Date representation to JS Date
-	 * ```
-	 * fromDriver(value: string): Date {
-	 * 	return new Date(value);
-	 * },
-	 * ```
-	 */
 	fromDriver?: (value: T['driverData']) => T['data'];
+	/**
+	 * Optional default selection wrapper invoked automatically when this custom column is selected.
+	 */
+	selectFromDb?: (
+		column: string,
+		decoder: DriverValueMapper<T['data'], T['driverData']>,
+	) => SQL<T['data']> | SQL.Aliased<T['data']>;
 }
 
-/**
- * Custom pg database data type generator
- */
 export function customType<T extends CustomTypeValues = CustomTypeValues>(
 	customTypeParams: CustomTypeParams<T>,
 ): Equal<T['configRequired'], true> extends true ? {
@@ -227,6 +148,10 @@ export function customType<T extends CustomTypeValues = CustomTypeValues>(
 		b?: T['config'],
 	): PgCustomColumnBuilder<ConvertCustomConfig<TName, T>> => {
 		const { name, config } = getColumnNameAndConfig<T['config']>(a, b);
-		return new PgCustomColumnBuilder(name as ConvertCustomConfig<TName, T>['name'], config, customTypeParams);
+		return new PgCustomColumnBuilder(
+			name as ConvertCustomConfig<TName, T>['name'],
+			config,
+			customTypeParams,
+		);
 	};
 }
